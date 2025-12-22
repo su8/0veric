@@ -25,6 +25,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <ctime>
 #include <sys/select.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -118,6 +119,12 @@ int main(int argc, char *argv[]) {
       }
       std::string msg(buffer);
       parseAndPrintMessage(msg);
+      // Get current time
+      std::time_t now = std::time(nullptr);
+      char timeStr[256] = {'\0'};
+      std::strftime(timeStr, sizeof(timeStr), "[%H:%M:%S]", std::localtime(&now));
+      // Print with timestamp
+      std::cout << timeStr << " " << msg;
       // Respond to PING
       if (msg.find("PING") == 0) {
         sendIRC(ssl, "PONG " + msg.substr(5));
