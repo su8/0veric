@@ -12,7 +12,7 @@ sudo/doas make install
 
 # Requirements
 
-gcc/clang/llvm , libssl-dev and openssl installed.
+gcc/clang/llvm , libssl-dev, readline and openssl installed.
 
 # Note
 
