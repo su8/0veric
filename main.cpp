@@ -230,7 +230,7 @@ void handleSigint(int) {
 }
 
 bool loadConfig(const std::string &filename, Config &cfg) {
-  std::ifstream file(getenv("HOME") ? static_cast<std::string>(getenv("HOME")) : static_cast<std::string>("./") + filename);
+  std::ifstream file(getenv("HOME") ? static_cast<std::string>(getenv("HOME")) + static_cast<std::string>("/") : static_cast<std::string>("./") + filename);
   if (!file) return false;
   std::string key, value;
   while (file >> key >> value) {
