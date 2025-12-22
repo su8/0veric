@@ -71,11 +71,9 @@ void inputHandler(char *input);
 
 int main(void) {
   signal(SIGINT, handleSigint);
-
   Config cfg;
   loadConfig(cfg);
   global_cfg = &cfg;
-
   while (running) {
     int sockfd = connectToServer(cfg.server, cfg.port);
     if (sockfd < 0) {
@@ -83,16 +81,13 @@ int main(void) {
       sleep(5);
       continue;
     }
-
     SSL_CTX *ctx = initSSL();
     if (!ctx) {
       close(sockfd);
       break;
     }
-
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sockfd);
-
     if (SSL_connect(ssl) <= 0) {
       ERR_print_errors_fp(stderr);
       SSL_free(ssl);
@@ -101,14 +96,11 @@ int main(void) {
       sleep(5);
       continue;
     }
-
     global_ssl = ssl;
-
     {
       std::lock_guard<std::mutex> lock(coutMutex);
       std::cout << "[" << timestamp() << "] Connected to " << cfg.server << " with " << SSL_get_cipher(ssl) << " encryption.\n";
     }
-
     // IRC handshake
     sendIRC(ssl, "NICK " + cfg.nick);
     sendIRC(ssl, "USER " + cfg.user);
@@ -116,29 +108,23 @@ int main(void) {
     for (const auto &chan : cfg.channels) {
       sendIRC(ssl, "JOIN " + chan);
     }
-
     // Setup readline
     rl_callback_handler_install("> ", inputHandler);
-
     fd_set readfds;
     struct timeval tv;
     char buffer[512] = {'\0'};
-
     while (running) {
       FD_ZERO(&readfds);
       int ssl_fd = SSL_get_fd(ssl);
       FD_SET(ssl_fd, &readfds);
       FD_SET(STDIN_FILENO, &readfds);
-
       tv.tv_sec = 1;
       tv.tv_usec = 0;
-
       int activity = select(std::max(ssl_fd, STDIN_FILENO) + 1, &readfds, nullptr, nullptr, &tv);
       if (activity < 0 && running) {
         perror("select");
         break;
       }
-
       // Server messages
       if (FD_ISSET(ssl_fd, &readfds)) {
         std::memset(buffer, 0, sizeof(buffer));
@@ -157,25 +143,21 @@ int main(void) {
           handleMessage(msg, ssl, cfg);
         }
       }
-
       // User input
       if (FD_ISSET(STDIN_FILENO, &readfds)) {
         rl_callback_read_char();
       }
     }
-
     rl_callback_handler_remove();
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     close(sockfd);
-
     if (running) {
       std::cerr << "[" << timestamp() << "] Reconnecting in 5 seconds...\n";
       sleep(5);
     }
   }
-
   return EXIT_SUCCESS;
 }
 
@@ -188,7 +170,6 @@ void inputHandler(char *input) {
   free(input);
   if (cmd.empty()) return;
   add_history(cmd.c_str());
-
   if (cmd == "/quit") {
     sendIRC(global_ssl, "QUIT :Bye!");
     running = false;
@@ -274,14 +255,12 @@ SSL_CTX *initSSL(void) {
   SSL_library_init();
   SSL_load_error_strings();
   OpenSSL_add_all_algorithms();
-
   const SSL_METHOD *method = TLS_client_method();
   SSL_CTX *ctx = SSL_CTX_new(method);
   if (!ctx) {
     ERR_print_errors_fp(stderr);
     return nullptr;
   }
-
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
   SSL_CTX_set_default_verify_paths(ctx);
 
@@ -292,28 +271,23 @@ int connectToServer(const std::string &server, int port) {
   int sockfd;
   struct sockaddr_in serv_addr{};
   struct hostent *server_host;
-
   if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     perror("Socket creation failed");
     return -1;
   }
-
   if ((server_host = gethostbyname(server.c_str())) == nullptr) {
     std::cerr << "No such host: " << server << std::endl;
     close(sockfd);
     return -1;
   }
-
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(port);
   std::memcpy(&serv_addr.sin_addr.s_addr, server_host->h_addr, server_host->h_length);
-
   if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
     perror("Connection failed");
     close(sockfd);
     return -1;
   }
-
   return sockfd;
 }
 
@@ -321,16 +295,13 @@ IRCMessage parseIRCMessage(const std::string &raw) {
   IRCMessage msg;
   std::istringstream iss(raw);
   std::string token;
-
   if (!raw.empty() && raw[0] == ':') {
     iss >> token;
     msg.prefix = token.substr(1);
   }
-
   if (iss >> token) {
     msg.command = token;
   }
-
   while (iss >> token) {
     if (token[0] == ':') {
       std::string trailing = token.substr(1);
