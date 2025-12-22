@@ -18,182 +18,296 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <fstream>
+#include <ctime>
+#include <csignal>
 #include <cstring>
 #include <cstdlib>
-#include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <unistd.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <fcntl.h>
-#include <ctime>
-#include <sys/select.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <sys/select.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
-// ANSI color codes
-#define COLOR_RESET   "\033[0;0m"
-#define COLOR_GREEN   "\033[32m"
-#define COLOR_YELLOW  "\033[33m"
-#define COLOR_CYAN    "\033[36m"
-#define COLOR_MAGENTA "\033[35m"
-#define COLOR_RED     "\033[31m"
+std::atomic<bool> running(true);
+std::mutex coutMutex;
 
-// Global channel list for tab-completion
-std::vector<std::string> channels;
+// Global pointers for readline callback
+SSL *global_ssl = nullptr;
+struct Config *global_cfg = nullptr;
 
-// Connect to IRC server via TCP
-int tcpConnect(const std::string &server, int port);
-// Send IRC command over SSL
+struct Config {
+  std::string server = "irc.libera.chat";
+  int port = 6697;
+  std::string nick = "Lunnis";
+  std::string user = "Lunnis 0 * :GNU IRC Client";
+  std::vector<std::string> channels = {"#ubuntu"};
+  std::string logFile = "/tmp/0veric.log";
+  std::string activeChannel = "#ubuntu";
+};
+
+struct IRCMessage {
+  std::string prefix;
+  std::string command;
+  std::vector<std::string> params;
+};
+
+std::string timestamp(void);
+void logToFile(const std::string &filename, const std::string &line);
+IRCMessage parseIRCMessage(const std::string &raw);
+int connectToServer(const std::string &server, int port);
+SSL_CTX *initSSL(void);
 void sendIRC(SSL *ssl, const std::string &cmd);
-// Set file descriptor to non-blocking mode
-void setNonBlocking(int fd);
-// Tab-completion generator
-char *channelNameGenerator(const char *text, int state);
-// Completion function for Readline
-char **channelCompletion(const char *text, int start, int end);
-// Parse and colorize IRC messages
-void parseAndPrintMessage(const std::string &msg);
+void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg);
+bool loadConfig(const std::string &filename, Config &cfg);
+void handleSigint(int);
+void inputHandler(char *input);
 
-int main(int argc, char *argv[]) {
-  if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <server> <port> <nick> <channel1> <channel2> ...\n";
-    return EXIT_FAILURE;
+int main(void) {
+  signal(SIGINT, handleSigint);
+
+  Config cfg;
+  loadConfig(".0veric.conf", cfg);
+  global_cfg = &cfg;
+
+  while (running) {
+    int sockfd = connectToServer(cfg.server, cfg.port);
+    if (sockfd < 0) {
+      std::cerr << "[" << timestamp() << "] Retry in 5 seconds...\n";
+      sleep(5);
+      continue;
+    }
+
+    SSL_CTX *ctx = initSSL();
+    if (!ctx) {
+      close(sockfd);
+      break;
+    }
+
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+
+    if (SSL_connect(ssl) <= 0) {
+      ERR_print_errors_fp(stderr);
+      SSL_free(ssl);
+      SSL_CTX_free(ctx);
+      close(sockfd);
+      sleep(5);
+      continue;
+    }
+
+    global_ssl = ssl;
+
+    {
+      std::lock_guard<std::mutex> lock(coutMutex);
+      std::cout << "[" << timestamp() << "] Connected to " << cfg.server << " with " << SSL_get_cipher(ssl) << " encryption.\n";
+    }
+
+    // IRC handshake
+    sendIRC(ssl, "NICK " + cfg.nick);
+    sendIRC(ssl, "USER " + cfg.user);
+    sleep(2);
+    for (const auto &chan : cfg.channels) {
+      sendIRC(ssl, "JOIN " + chan);
+    }
+
+    // Setup readline
+    rl_callback_handler_install("> ", inputHandler);
+
+    fd_set readfds;
+    struct timeval tv;
+    char buffer[512] = {'\0'};
+
+    while (running) {
+      FD_ZERO(&readfds);
+      int ssl_fd = SSL_get_fd(ssl);
+      FD_SET(ssl_fd, &readfds);
+      FD_SET(STDIN_FILENO, &readfds);
+
+      tv.tv_sec = 1;
+      tv.tv_usec = 0;
+
+      int activity = select(std::max(ssl_fd, STDIN_FILENO) + 1, &readfds, nullptr, nullptr, &tv);
+      if (activity < 0 && running) {
+        perror("select");
+        break;
+      }
+
+      // Server messages
+      if (FD_ISSET(ssl_fd, &readfds)) {
+        std::memset(buffer, 0, sizeof(buffer));
+        int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
+        if (bytes <= 0) {
+          std::lock_guard<std::mutex> lock(coutMutex);
+          std::cerr << "[" << timestamp() << "] Connection closed by server.\n";
+          break;
+        }
+        std::istringstream stream(buffer);
+        std::string line;
+        while (std::getline(stream, line)) {
+          if (line.empty()) continue;
+          if (line.back() == '\r') line.pop_back();
+          IRCMessage msg = parseIRCMessage(line);
+          handleMessage(msg, ssl, cfg);
+        }
+      }
+
+      // User input
+      if (FD_ISSET(STDIN_FILENO, &readfds)) {
+        rl_callback_read_char();
+      }
+    }
+
+    rl_callback_handler_remove();
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    close(sockfd);
+
+    if (running) {
+      std::cerr << "[" << timestamp() << "] Reconnecting in 5 seconds...\n";
+      sleep(5);
+    }
   }
-  std::string server = argv[1];
-  int port = std::stoi(argv[2]);
-  std::string nick = argv[3];
-  std::string user = nick + " 0 * :" + nick;
-  for (int x = 4; x < argc; x++) {
-    channels.push_back(argv[x]);
+
+  return EXIT_SUCCESS;
+}
+
+void inputHandler(char *input) {
+  if (!input) {
+    running = false;
+    return;
   }
-  // Setup Readline tab-completion
-  rl_attempted_completion_function = channelCompletion;
-  // Connect to IRC
-  int sockfd = tcpConnect(server, port);
-  if (sockfd < 0) { return EXIT_FAILURE; }
+  std::string cmd(input);
+  free(input);
+  if (cmd.empty()) return;
+  add_history(cmd.c_str());
+
+  if (cmd == "/quit") {
+    sendIRC(global_ssl, "QUIT :Bye!");
+    running = false;
+  } else if (cmd.rfind("/join ", 0) == 0) {
+    sendIRC(global_ssl, "JOIN " + cmd.substr(6));
+    global_cfg->channels.push_back(cmd.substr(6));
+    global_cfg->activeChannel = cmd.substr(6);
+  } else if (cmd.rfind("/switch ", 0) == 0) {
+    std::string chan = cmd.substr(8);
+    for (auto &c : global_cfg->channels) {
+      if (c == chan) {
+        global_cfg->activeChannel = chan;
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << "[" << timestamp() << "] *** Switched to " << chan << "\n";
+        return;
+      }
+    }
+    std::lock_guard<std::mutex> lock(coutMutex);
+    std::cout << "[" << timestamp() << "] *** Not in channel " << chan << "\n";
+  } else if (cmd.rfind("/msg ", 0) == 0) {
+    std::istringstream iss(cmd.substr(5));
+    std::string target;
+    iss >> target;
+    std::string text;
+    std::getline(iss, text);
+    if (!text.empty() && text[0] == ' ') text.erase(0, 1);
+    sendIRC(global_ssl, "PRIVMSG " + target + " :" + text);
+  } else {
+    // Default: send to active channel
+    sendIRC(global_ssl, "PRIVMSG " + global_cfg->activeChannel + " :" + cmd);
+  }
+}
+
+
+void handleSigint(int) {
+  running = false;
+  std::lock_guard<std::mutex> lock(coutMutex);
+  std::cout << "\n[" << timestamp() << "] *** Caught SIGINT, exiting...\n";
+}
+
+bool loadConfig(const std::string &filename, Config &cfg) {
+  std::ifstream file(getenv("HOME") ? static_cast<std::string>(getenv("HOME")) : static_cast<std::string>("./") + filename);
+  if (!file) return false;
+  std::string key, value;
+  while (file >> key >> value) {
+    if (key == "server") cfg.server = value;
+    else if (key == "port") cfg.port = std::stoi(value);
+    else if (key == "nick") cfg.nick = value;
+    else if (key == "channel") cfg.channels.push_back(value);
+    else if (key == "logfile") cfg.logFile = value;
+  }
+  if (!cfg.channels.empty()) cfg.activeChannel = cfg.channels[0];
+  return true;
+}
+
+void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg) {
+  if (msg.command == "PING" && !msg.params.empty()) {
+    sendIRC(ssl, "PONG :" + msg.params[0]);
+  } else if (msg.command == "PRIVMSG" && msg.params.size() >= 2) {
+    std::string user = msg.prefix.substr(0, msg.prefix.find('!'));
+    std::string channel = msg.params[0];
+    std::string text = msg.params[1];
+    std::lock_guard<std::mutex> lock(coutMutex);
+    rl_on_new_line();
+    rl_redisplay();
+    std::cout << "\r[" << timestamp() << "] [" << channel << "] <" << user << "> " << text << "\n";
+    rl_on_new_line();
+    rl_redisplay();
+    logToFile(cfg.logFile, "[" + channel + "] <" + user + "> " + text);
+  } else {
+    logToFile(cfg.logFile, "[RAW] " + msg.command);
+  }
+}
+
+void sendIRC(SSL *ssl, const std::string &cmd) {
+  std::string message = cmd + "\r\n";
+  if (SSL_write(ssl, message.c_str(), message.size()) <= 0) {
+    ERR_print_errors_fp(stderr);
+  }
+}
+
+SSL_CTX *initSSL(void) {
   SSL_library_init();
   SSL_load_error_strings();
   OpenSSL_add_all_algorithms();
+
   const SSL_METHOD *method = TLS_client_method();
   SSL_CTX *ctx = SSL_CTX_new(method);
   if (!ctx) {
     ERR_print_errors_fp(stderr);
-    close(sockfd);
-    return EXIT_FAILURE;
-  }
-  SSL *ssl = SSL_new(ctx);
-  SSL_set_fd(ssl, sockfd);
-  if (SSL_connect(ssl) <= 0) {
-    ERR_print_errors_fp(stderr);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    close(sockfd);
-    return EXIT_FAILURE;
-  }
-  std::cout << COLOR_GREEN << "Connected securely to " << server << " via TLS.\n" << COLOR_RESET;
-  // IRC handshake
-  sendIRC(ssl, "NICK " + nick);
-  sendIRC(ssl, "USER " + user);
-  sleep(2);
-  for (const auto &ch : channels) {
-    sendIRC(ssl, "JOIN " + ch);
+    return nullptr;
   }
 
-  // Main loop: interactive with tab-completion
-  char buffer[512] = {'\0'};
-  while (true) {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(sockfd, &readfds);
-    struct timeval tv{0, 100000}; // 100ms
-    int activity = select(sockfd + 1, &readfds, nullptr, nullptr, &tv);
-    // Handle server messages
-    if (activity > 0 && FD_ISSET(sockfd, &readfds)) {
-      std::memset(buffer, 0, sizeof(buffer));
-      int bytes = SSL_read(ssl, buffer, sizeof(buffer) - 1);
-      if (bytes <= 0) {
-        std::cerr << COLOR_RED << "Disconnected from server.\n" << COLOR_RESET;
-        break;
-      }
-      std::string msg(buffer);
-      parseAndPrintMessage(msg);
-      // Get current time
-      std::time_t now = std::time(nullptr);
-      char timeStr[256] = {'\0'};
-      std::strftime(timeStr, sizeof(timeStr), "[%H:%M:%S]", std::localtime(&now));
-      // Print with timestamp
-      std::cout << timeStr << " " << msg;
-      // Respond to PING
-      if (msg.find("PING") == 0) {
-        sendIRC(ssl, "PONG " + msg.substr(5));
-      }
-    }
-    // Handle user input (blocking readline)
-    char *line = readline("> ");
-    if (!line) break; // EOF (Ctrl+D)
-    std::string input(line);
-    free(line);
-    if (!input.empty()) {
-      add_history(input.c_str());
-    }
-    if (input == "/quit") {
-      sendIRC(ssl, "QUIT :Bye!");
-      break;
-    }
-    else if (input.rfind("/join ", 0) == 0) {
-      std::string newChannel = input.substr(6);
-      sendIRC(ssl, "JOIN " + newChannel);
-      channels.push_back(newChannel);
-    }
-    else if (input.rfind("/part ", 0) == 0) {
-      std::string partChannel = input.substr(6);
-      sendIRC(ssl, "PART " + partChannel);
-      channels.erase(std::remove(channels.begin(), channels.end(), partChannel), channels.end());
-    }
-    else if (input.rfind("/msg ", 0) == 0) {
-      size_t spacePos = input.find(' ', 5);
-      if (spacePos != std::string::npos) {
-        std::string targetChannel = input.substr(5, spacePos - 5);
-        std::string message = input.substr(spacePos + 1);
-        sendIRC(ssl, "PRIVMSG " + targetChannel + " :" + message);
-      } else {
-        std::cout << COLOR_YELLOW << "Usage: /msg #channel message" << COLOR_RESET << "\n";
-      }
-    }
-    else if (!input.empty()) {
-      // Send to all joined channels
-      for (const auto &ch : channels) {
-        sendIRC(ssl, "PRIVMSG " + ch + " :" + input);
-      }
-    }
-  }
-  // Cleanup
-  SSL_shutdown(ssl);
-  SSL_free(ssl);
-  SSL_CTX_free(ctx);
-  close(sockfd);
-  return EXIT_SUCCESS;
+  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+  SSL_CTX_set_default_verify_paths(ctx);
+
+  return ctx;
 }
 
-// Connect to IRC server via TCP
-int tcpConnect(const std::string &server, int port) {
+int connectToServer(const std::string &server, int port) {
   int sockfd;
   struct sockaddr_in serv_addr{};
   struct hostent *server_host;
+
   if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     perror("Socket creation failed");
     return -1;
   }
+
   if ((server_host = gethostbyname(server.c_str())) == nullptr) {
     std::cerr << "No such host: " << server << std::endl;
     close(sockfd);
     return -1;
   }
+
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(port);
   std::memcpy(&serv_addr.sin_addr.s_addr, server_host->h_addr, server_host->h_length);
+
   if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
     perror("Connection failed");
     close(sockfd);
@@ -203,78 +317,43 @@ int tcpConnect(const std::string &server, int port) {
   return sockfd;
 }
 
-// Send IRC command over SSL
-void sendIRC(SSL *ssl, const std::string &cmd) {
-  std::string message = cmd + "\r\n";
-  if (SSL_write(ssl, message.c_str(), message.size()) <= 0) {
-    std::cerr << COLOR_RED << "SSL write failed.\n" << COLOR_RESET;
-  }
-}
+IRCMessage parseIRCMessage(const std::string &raw) {
+  IRCMessage msg;
+  std::istringstream iss(raw);
+  std::string token;
 
-// Set file descriptor to non-blocking mode
-void setNonBlocking(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-// Tab-completion generator
-char *channelNameGenerator(const char *text, int state) {
-  static size_t list_index;
-  static size_t len;
-  if (!state) {
-    list_index = 0;
-    len = strlen(text);
+  if (!raw.empty() && raw[0] == ':') {
+    iss >> token;
+    msg.prefix = token.substr(1);
   }
-  while (list_index < channels.size()) {
-    const std::string &name = channels[list_index++];
-    if (name.compare(0, len, text) == 0) {
-      return strdup(name.c_str());
+
+  if (iss >> token) {
+    msg.command = token;
+  }
+
+  while (iss >> token) {
+    if (token[0] == ':') {
+      std::string trailing = token.substr(1);
+      std::string rest;
+      std::getline(iss, rest);
+      trailing += rest;
+      msg.params.push_back(trailing);
+      break;
+    } else {
+      msg.params.push_back(token);
     }
   }
-  return nullptr;
+  return msg;
 }
 
-// Completion function for Readline
-char **channelCompletion(const char *text, int start, int end) {
-  rl_attempted_completion_over = 1;
-  // Only complete after /msg or /part
-  if (start >= 5 && (strncmp(rl_line_buffer, "/msg ", 5) == 0 || strncmp(rl_line_buffer, "/part ", 6) == 0)) {
-    return rl_completion_matches(text, channelNameGenerator);
-  }
-  return nullptr;
+std::string timestamp(void) {
+  std::time_t now = std::time(nullptr);
+  char buf[128] = {'\0'};
+  std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+  return std::string(buf);
 }
 
-// Parse and colorize IRC messages
-void parseAndPrintMessage(const std::string &msg) {
-  if (msg.find("PING") == 0) {
-    std::cout << COLOR_YELLOW << "[Server PING]" << COLOR_RESET << "\n";
-    return;
-  }
-  if (msg.find("PRIVMSG") != std::string::npos) {
-    size_t ex = msg.find('!');
-    size_t col = msg.find(':', 1);
-    if (ex != std::string::npos && col != std::string::npos) {
-      std::string nick = msg.substr(1, ex - 1);
-      std::string text = msg.substr(col + 1);
-      std::cout << COLOR_CYAN << "<" << nick << "> " << COLOR_RESET << text << "\n";
-      return;
-    }
-  }
-  if (msg.find("JOIN") != std::string::npos) {
-    size_t ex = msg.find('!');
-    if (ex != std::string::npos) {
-      std::string nick = msg.substr(1, ex - 1);
-      std::cout << COLOR_GREEN << "[JOIN] " << nick << COLOR_RESET << "\n";
-      return;
-    }
-  }
-  if (msg.find("PART") != std::string::npos) {
-    size_t ex = msg.find('!');
-    if (ex != std::string::npos) {
-      std::string nick = msg.substr(1, ex - 1);
-      std::cout << COLOR_MAGENTA << "[PART] " << nick << COLOR_RESET << "\n";
-      return;
-    }
-  }
-  std::cout << msg;
+void logToFile(const std::string &filename, const std::string &line) {
+  std::ofstream out(filename, std::ios::app);
+  if (out) out << "[" << timestamp() << "] " << line << "\n";
 }

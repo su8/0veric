@@ -12,8 +12,17 @@ sudo/doas make install
 
 # Requirements
 
-gcc/clang/llvm and openssl installed.
+gcc/clang/llvm , libssl-dev, readline and openssl installed.
 
-# Note
+### Using configuration file
 
-By defualt I've chosen to `press Enter` to fetch data from the channels that you've joined.
+It's stored in **~/.0veric.conf**
+
+```python
+server irc.libera.chat
+port 6697
+nick Lunnis
+user Lunnis 0 * :GNU IRC Client
+channel #debian
+logfile /home/user/.0veric.log
+```
