@@ -30,4 +30,4 @@ logfile /home/user/.0veric.log
 
 ---
 
-Once you `/join #channelNameGoesHere` to switch to another one type `/swithc #channelNameGoesHere`. Obviously replace the **channelNameGoesHere** with real channel name.
+Once you `/join #channelNameGoesHere` to switch to another one type `/switch #channelNameGoesHere`. Obviously replace the **channelNameGoesHere** with real channel name.
