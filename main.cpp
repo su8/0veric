@@ -65,7 +65,7 @@ int connectToServer(const std::string &server, int port);
 SSL_CTX *initSSL(void);
 void sendIRC(SSL *ssl, const std::string &cmd);
 void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg);
-bool loadConfig(const std::string &filename, Config &cfg);
+bool loadConfig(Config &cfg);
 void handleSigint(int);
 void inputHandler(char *input);
 
@@ -73,7 +73,7 @@ int main(void) {
   signal(SIGINT, handleSigint);
 
   Config cfg;
-  loadConfig(".0veric.conf", cfg);
+  loadConfig(cfg);
   global_cfg = &cfg;
 
   while (running) {
@@ -229,8 +229,8 @@ void handleSigint(int) {
   std::cout << "\n[" << timestamp() << "] *** Caught SIGINT, exiting...\n";
 }
 
-bool loadConfig(const std::string &filename, Config &cfg) {
-  std::ifstream file(getenv("HOME") ? static_cast<std::string>(getenv("HOME")) + static_cast<std::string>("/") : static_cast<std::string>("./") + filename);
+bool loadConfig(Config &cfg) {
+  std::ifstream file((getenv("HOME") ? static_cast<std::string>(getenv("HOME")) + static_cast<std::string>("/") : static_cast<std::string>("./")) + ".0veric.conf");
   if (!file) return false;
   std::string key, value;
   while (file >> key >> value) {

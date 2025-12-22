@@ -22,7 +22,6 @@ It's stored in **~/.0veric.conf**
 server irc.libera.chat
 port 6697
 nick Lunnis
-user Lunnis 0 * :GNU IRC Client
 channel #debian
 channel #ubuntu
 logfile /home/user/.0veric.log
