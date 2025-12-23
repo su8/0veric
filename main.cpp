@@ -29,9 +29,9 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <sys/select.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <sys/select.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -263,7 +263,6 @@ SSL_CTX *initSSL(void) {
   }
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
   SSL_CTX_set_default_verify_paths(ctx);
-
   return ctx;
 }
 
