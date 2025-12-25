@@ -27,6 +27,19 @@ channel #ubuntu
 logfile /home/user/.0veric.log
 ```
 
+### Register your username
+
+```python
+/msg NickServ register <your_password> <your_email>
+/set <you_username> <your_password>
+```
+
+And before starting **0veric** in your console type:
+
+`export NICKSERV_PASSWORD="myPasswordGoesHere"`
+
+And start `0veric` after that.
+
 ---
 
 Once you `/join #channelNameGoesHere` to switch to another one type `/switch #channelNameGoesHere`. Obviously replace the **channelNameGoesHere** with real channel name.

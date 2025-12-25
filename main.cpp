@@ -22,6 +22,7 @@
 #include <fstream>
 #include <ctime>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <atomic>
@@ -74,6 +75,11 @@ int main(void) {
   Config cfg;
   loadConfig(cfg);
   global_cfg = &cfg;
+  std::string nickServ = getenv("NICKSERV_PASSWORD") ? static_cast<std::string>(getenv("NICKSERV_PASSWORD")) : static_cast<std::string>("");
+  unsigned int hasNickServ = 0U;
+  if (!nickServ.empty()) {
+    hasNickServ = 1U;
+  }
   while (running) {
     int sockfd = connectToServer(cfg.server, cfg.port);
     if (sockfd < 0) {
@@ -113,6 +119,7 @@ int main(void) {
     fd_set readfds;
     struct timeval tv;
     char buffer[512] = {'\0'};
+    bool identified = false;
     while (running) {
       FD_ZERO(&readfds);
       int ssl_fd = SSL_get_fd(ssl);
@@ -133,6 +140,16 @@ int main(void) {
           std::lock_guard<std::mutex> lock(coutMutex);
           std::cerr << "[" << timestamp() << "] Connection closed by server.\n";
           break;
+        }
+        if (hasNickServ) {
+          std::string data(buffer);
+          if (!identified && data.rfind("End of /MOTD") != std::string::npos) {
+            sendIRC(global_ssl, "PRIVMSG NickServ :IDENTIFY " + nickServ);
+            identified = true;
+          }
+          if (identified && data.rfind("You are now identified") != std::string::npos) {
+            sendIRC(global_ssl, "PRIVMSG " + cfg.activeChannel + " : Hello form a secure, verified TLS IRC client!");
+          }
         }
         std::istringstream stream(buffer);
         std::string line;
