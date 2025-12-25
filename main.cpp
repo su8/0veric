@@ -102,6 +102,23 @@ int main(void) {
       sleep(5);
       continue;
     }
+    X509 *cert = SSL_get_peer_certificate(ssl);
+    if (!cert) {
+      std::cerr << "Error: No certificate presented by server." << std::endl;
+      SSL_free(ssl);
+      SSL_CTX_free(ctx);
+      close(sockfd);
+      sleep(5);
+      continue;
+    }
+    if (SSL_get_verify_result(ssl) != X509_V_OK) {
+      SSL_free(ssl);
+      SSL_CTX_free(ctx);
+      close(sockfd);
+      sleep(5);
+      continue;
+    }
+    std::cout << "SSL connection established and certificate verified." << std::endl;
     global_ssl = ssl;
     {
       std::lock_guard<std::mutex> lock(coutMutex);
