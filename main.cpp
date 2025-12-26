@@ -159,6 +159,7 @@ int main(void) {
           std::cerr << "[" << timestamp() << "] Connection closed by server.\n";
           break;
         }
+        std::cout << buffer << std::endl;
         if (hasNickServ) {
           std::string data(buffer);
           if (!identified && data.rfind("End of /MOTD") != std::string::npos) {
