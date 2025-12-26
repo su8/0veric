@@ -112,6 +112,7 @@ int main(void) {
       continue;
     }
     if (SSL_get_verify_result(ssl) != X509_V_OK) {
+      std::cerr << "Error: certificate verification failed." << std::endl;
       SSL_free(ssl);
       SSL_CTX_free(ctx);
       close(sockfd);
