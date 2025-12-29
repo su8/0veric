@@ -125,9 +125,6 @@ int main(void) {
     sendIRC(ssl, "NICK " + cfg.nick);
     sendIRC(ssl, "USER " + cfg.user);
     sleep(2);
-    for (const auto &chan : cfg.channels) {
-      sendIRC(ssl, "JOIN " + chan);
-    }
     // Setup readline
     rl_callback_handler_install("> ", inputHandler);
     fd_set readfds;
@@ -164,6 +161,9 @@ int main(void) {
           }
           if (identified && data.rfind("You are now identified") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG " + cfg.activeChannel + " : Hello form a secure, verified TLS IRC client!");
+          }
+          for (const auto &chan : cfg.channels) {
+            sendIRC(ssl, "JOIN " + chan);
           }
         }
         std::istringstream stream(buffer);
