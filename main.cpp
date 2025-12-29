@@ -155,15 +155,15 @@ int main(void) {
         std::cout << buffer << std::endl;
         if (!nickServ.empty()) {
           std::string data(buffer);
-          if (!identified && data.rfind("End of /MOTD") != std::string::npos) {
+          if (!identified && data.rfind(" 376 ") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG NickServ :IDENTIFY " + nickServ);
             identified = true;
+            for (const auto &chan : cfg.channels) {
+              sendIRC(ssl, "JOIN " + chan);
+            }
           }
           if (identified && data.rfind("You are now identified") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG " + cfg.activeChannel + " : Hello form a secure, verified TLS IRC client!");
-          }
-          for (const auto &chan : cfg.channels) {
-            sendIRC(ssl, "JOIN " + chan);
           }
         }
         std::istringstream stream(buffer);
