@@ -76,10 +76,6 @@ int main(void) {
   loadConfig(cfg);
   global_cfg = &cfg;
   std::string nickServ = getenv("NICKSERV_PASSWORD") ? static_cast<std::string>(getenv("NICKSERV_PASSWORD")) : static_cast<std::string>("");
-  unsigned int hasNickServ = 0U;
-  if (!nickServ.empty()) {
-    hasNickServ = 1U;
-  }
   while (running) {
     int sockfd = connectToServer(cfg.server, cfg.port);
     if (sockfd < 0) {
@@ -160,7 +156,7 @@ int main(void) {
           break;
         }
         std::cout << buffer << std::endl;
-        if (hasNickServ) {
+        if (!nickServ.empty()) {
           std::string data(buffer);
           if (!identified && data.rfind("End of /MOTD") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG NickServ :IDENTIFY " + nickServ);
