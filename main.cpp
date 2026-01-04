@@ -29,6 +29,8 @@
 #include <mutex>
 #include <unistd.h>
 #include <netdb.h>
+#include <algorithm>
+#include <map>
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <openssl/ssl.h>
@@ -42,6 +44,7 @@ std::mutex coutMutex;
 // Global pointers for readline callback
 SSL *global_ssl = nullptr;
 struct Config *global_cfg = nullptr;
+std::map<std::string, std::vector<std::string>> channelNicks;
 
 struct Config {
   std::string server = "irc.libera.chat";
@@ -69,6 +72,12 @@ void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg);
 bool loadConfig(Config &cfg);
 void handleSigint(int);
 void inputHandler(char *input);
+// Parse NAMES reply (353) to extract nicknames
+void parseNamesReply(const std::string &msg);
+// Readline completion generator
+char *nicknameGenerator(const char* text, int state);
+// Readline completion entry point
+char **nicknameCompletion(const char* text, int start, int end);
 
 int main(void) {
   signal(SIGINT, handleSigint);
@@ -108,7 +117,6 @@ int main(void) {
       continue;
     }
     if (SSL_get_verify_result(ssl) != X509_V_OK) {
-      std::cerr << "Error: certificate verification failed." << std::endl;
       SSL_free(ssl);
       SSL_CTX_free(ctx);
       close(sockfd);
@@ -126,6 +134,7 @@ int main(void) {
     sendIRC(ssl, "USER " + cfg.user);
     sleep(2);
     // Setup readline
+    rl_attempted_completion_function = nicknameCompletion;
     rl_callback_handler_install("> ", inputHandler);
     fd_set readfds;
     struct timeval tv;
@@ -153,19 +162,25 @@ int main(void) {
           break;
         }
         std::cout << buffer << std::endl;
+        std::string data(buffer);
         if (!nickServ.empty()) {
-          std::string data(buffer);
           if (!identified && data.rfind(" 376 ") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG NickServ :IDENTIFY " + nickServ);
             identified = true;
             for (const auto &chan : cfg.channels) {
               sendIRC(ssl, "JOIN " + chan);
             }
+            //sendIRC(global_ssl, "CAP REQ :server-time chathistory");
+            //sendIRC(global_ssl, "CHATHISTORY LATEST" + cfg.activeChannel + " * 20");
           }
           if (identified && data.rfind("You are now identified") != std::string::npos) {
             sendIRC(global_ssl, "PRIVMSG " + cfg.activeChannel + " : Hello form a secure, verified TLS IRC client!");
           }
         }
+        if (data.rfind(" 353 ") != std::string::npos) {
+          parseNamesReply(data);
+        }
+        data = "";
         std::istringstream stream(buffer);
         std::string line;
         while (std::getline(stream, line)) {
@@ -191,6 +206,70 @@ int main(void) {
     }
   }
   return EXIT_SUCCESS;
+}
+
+
+// Parse NAMES reply (353) to extract nicknames for a specific channel
+void parseNamesReply(const std::string &msg) {
+  // Example: ":server 353 nick = #channel :nick1 nick2 nick3"
+  size_t chanStart = msg.find(" = ");
+  if (chanStart == std::string::npos) return;
+  chanStart += 3;
+  size_t chanEnd = msg.find(" :", chanStart);
+  if (chanEnd == std::string::npos) return;
+
+  std::string channel = msg.substr(chanStart, chanEnd - chanStart);
+  std::string names = msg.substr(chanEnd + 2);
+
+  std::vector<std::string> &nickList = channelNicks[channel];
+  nickList.clear();
+
+  size_t start = 0, end;
+  while ((end = names.find(' ', start)) != std::string::npos) {
+    std::string nick = names.substr(start, end - start);
+    if (!nick.empty() && (nick[0] == '@' || nick[0] == '+'))
+      nick = nick.substr(1);
+    nickList.push_back(nick);
+    start = end + 1;
+  }
+  std::string lastNick = names.substr(start);
+  if (!lastNick.empty() && (lastNick[0] == '@' || lastNick[0] == '+'))
+    lastNick = lastNick.substr(1);
+  if (!lastNick.empty())
+    nickList.push_back(lastNick);
+}
+
+// Readline completion generator
+char *nicknameGenerator(const char* text, int state) {
+  static size_t list_index;
+  static size_t len;
+  static std::vector<std::string> matches;
+
+  if (!state) { // First call
+    list_index = 0;
+    len = strlen(text);
+    matches.clear();
+
+    auto it = channelNicks.find(global_cfg->activeChannel);
+    if (it != channelNicks.end()) {
+      for (const auto &nick : it->second) {
+        if (nick.compare(0, len, text) == 0) {
+          matches.push_back(nick);
+        }
+      }
+    }
+  }
+
+  if (list_index < matches.size()) {
+    return strdup(matches[list_index++].c_str());
+  }
+  return nullptr;
+}
+
+// Readline completion entry point
+char **nicknameCompletion(const char* text, int start, int end) {
+  (void)start; (void)end;
+  return rl_completion_matches(text, nicknameGenerator);
 }
 
 void inputHandler(char *input) {
