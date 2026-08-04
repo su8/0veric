@@ -42,4 +42,4 @@ And start `0veric` after that.
 
 ---
 
-Once you `/join #channelNameGoesHere` to switch to another one type `/switch #channelNameGoesHere`. Obviously replace the **channelNameGoesHere** with real channel name.
+Once you `/join #channelNameGoesHere` to switch to another one type `/switch #channelNameGoesHere`. Obviously replace the **channelNameGoesHere** with real channel name. You can list the channels that you have joined by typing inside 0veric the following `/list`.
