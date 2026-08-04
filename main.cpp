@@ -1,5 +1,5 @@
 /*
- * Copyright 12/22/2025 https://github.com/su8/0veric
+ * Copyright 12/22/2025, 08/04/2026 https://github.com/su8/0veric
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -285,6 +285,11 @@ void inputHandler(char *input) {
   if (cmd == "/quit") {
     sendIRC(global_ssl, "QUIT :Bye!");
     running = false;
+  } else if (cmd == "/list") {
+    std::cout << "Joined to the following channel(s)" << "\n";
+    for (const auto &channel : global_cfg->channels) {
+      std::cout << channel << "\n";
+    }
   } else if (cmd.rfind("/join ", 0) == 0) {
     sendIRC(global_ssl, "JOIN " + cmd.substr(6));
     global_cfg->channels.push_back(cmd.substr(6));
