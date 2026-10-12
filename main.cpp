@@ -1,5 +1,5 @@
 /*
- * Copyright 10/12/2026 08/04/2026 12/22/2025 https://github.com/su8/0veric
+ * Copyright 12/22/2025, 08/04/2026 https://github.com/su8/0veric
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -348,7 +348,7 @@ void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg) {
   if (msg.command == "PING" && !msg.params.empty()) {
     sendIRC(ssl, "PONG :" + msg.params[0]);
   } else if (msg.command == "PRIVMSG" && msg.params.size() >= 2) {
-    std::string user = msg.prefix.substr(0, msg.prefix.find('!'));
+    std::string user = std::string("\033[1;36m") + msg.prefix.substr(0, msg.prefix.find('!')) + std::string("\033[0;0m");
     std::string channel = msg.params[0];
     std::string text = msg.params[1];
     std::lock_guard<std::mutex> lock(coutMutex);
