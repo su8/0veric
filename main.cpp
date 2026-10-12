@@ -1,5 +1,5 @@
 /*
- * Copyright 12/22/2025, 08/04/2026 https://github.com/su8/0veric
+ * Copyright 10/12/2026 08/04/2026 12/22/2025 https://github.com/su8/0veric
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -314,6 +314,8 @@ void inputHandler(char *input) {
     std::getline(iss, text);
     if (!text.empty() && text[0] == ' ') text.erase(0, 1);
     sendIRC(global_ssl, "PRIVMSG " + target + " :" + text);
+  } else if (cmd.rfind("/whois ", 0) == 0) {
+    sendIRC(global_ssl, "WHOIS " + cmd.substr(7));
   } else {
     // Default: send to active channel
     sendIRC(global_ssl, "PRIVMSG " + global_cfg->activeChannel + " :" + cmd);
