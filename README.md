@@ -25,6 +25,7 @@ nick Lunnis
 channel #debian
 channel #ubuntu
 logfile /home/user/.0veric.log
+colour true
 ```
 
 ### Register your username

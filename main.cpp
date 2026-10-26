@@ -23,6 +23,7 @@
 #include <ctime>
 #include <csignal>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <cstdlib>
 #include <atomic>
@@ -38,6 +39,9 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
+#define RESETCOLOUR "\033[0;0m"
+#define BOLD_YELLOW "\033[1;33m"
+
 std::atomic<bool> running(true);
 std::mutex coutMutex;
 
@@ -51,9 +55,10 @@ struct Config {
   int port = 6697;
   std::string nick = "Lunnis";
   std::string user = "Lunnis 0 * :GNU IRC Client";
-  std::vector<std::string> channels = {"#ubuntu"};
+  std::vector<std::string> channels = {"#ubuntu", "#debian"};
   std::string logFile = "/tmp/0veric.log";
   std::string activeChannel = "#ubuntu";
+  bool colour = true;
 };
 
 struct IRCMessage {
@@ -79,10 +84,21 @@ char *nicknameGenerator(const char* text, int state);
 // Readline completion entry point
 char **nicknameCompletion(const char* text, int start, int end);
 
+// The same nick always gets the same colour (case-insensitive, like IRC nicks)
+std::string nickColour(const std::string &nick);
+
+// Does the text mention our nick?
+bool mentions(std::string text, std::string nick);
+
+// Print one chat line. redraw is false when called from inside the readline
+// callback, because readline redraws the prompt itself after that
+void printChatLine(const std::string &channel, const std::string &nick, const std::string &text, bool redraw);
+
 int main(void) {
   signal(SIGINT, handleSigint);
   Config cfg;
   loadConfig(cfg);
+  if (getenv("NO_COLOR")) { cfg.colour = false; }
   global_cfg = &cfg;
   std::string nickServ = getenv("NICKSERV_PASSWORD") ? static_cast<std::string>(getenv("NICKSERV_PASSWORD")) : static_cast<std::string>("");
   while (running) {
@@ -314,11 +330,13 @@ void inputHandler(char *input) {
     std::getline(iss, text);
     if (!text.empty() && text[0] == ' ') text.erase(0, 1);
     sendIRC(global_ssl, "PRIVMSG " + target + " :" + text);
+    printChatLine(target, global_cfg->nick, text, false);
   } else if (cmd.rfind("/whois ", 0) == 0) {
     sendIRC(global_ssl, "WHOIS " + cmd.substr(7));
   } else {
     // Default: send to active channel
     sendIRC(global_ssl, "PRIVMSG " + global_cfg->activeChannel + " :" + cmd);
+    printChatLine(global_cfg->activeChannel, global_cfg->nick, cmd, false);
   }
 }
 
@@ -339,6 +357,7 @@ bool loadConfig(Config &cfg) {
     else if (key == "nick") cfg.nick = value;
     else if (key == "channel") cfg.channels.push_back(value);
     else if (key == "logfile") cfg.logFile = value;
+    else if (key == "colour") cfg.colour = (value != "off");
   }
   if (!cfg.channels.empty()) cfg.activeChannel = cfg.channels[0];
   return true;
@@ -348,16 +367,10 @@ void handleMessage(const IRCMessage &msg, SSL *ssl, const Config &cfg) {
   if (msg.command == "PING" && !msg.params.empty()) {
     sendIRC(ssl, "PONG :" + msg.params[0]);
   } else if (msg.command == "PRIVMSG" && msg.params.size() >= 2) {
-    std::string user = std::string("\033[1;36m") + msg.prefix.substr(0, msg.prefix.find('!')) + std::string("\033[0;0m");
-    std::string channel = msg.params[0];
-    std::string text = msg.params[1];
-    std::lock_guard<std::mutex> lock(coutMutex);
-    rl_on_new_line();
-    rl_redisplay();
-    std::cout << "\r[" << timestamp() << "] [" << channel << "] <" << user << "> " << text << "\n";
-    rl_on_new_line();
-    rl_redisplay();
-    logToFile(cfg.logFile, "[" + channel + "] <" + user + "> " + text);
+    std::string nick = msg.prefix.substr(0, msg.prefix.find('!'));
+    printChatLine(msg.params[0], nick, msg.params[1], false);
+    // The log gets the plain nick, without colour codes
+    logToFile(cfg.logFile, "[" + msg.params[0] + "] <" + nick + "> " + msg.params[1]);
   } else {
     logToFile(cfg.logFile, "[RAW] " + msg.command);
   }
@@ -445,4 +458,35 @@ std::string timestamp(void) {
 void logToFile(const std::string &filename, const std::string &line) {
   std::ofstream out(filename, std::ios::app);
   if (out) out << "[" << timestamp() << "] " << line << "\n";
+}
+
+// The same nick always gets the same colour (case-insensitive, like IRC nicks)
+std::string nickColour(const std::string &nick) {
+  static const char *palette[] = {
+    "\033[1;31m", "\033[1;32m", "\033[1;33m", "\033[1;34m", "\033[1;35m", "\033[1;36m",
+    "\033[1;91m", "\033[1;92m", "\033[1;93m", "\033[1;94m", "\033[1;95m", "\033[1;96m"
+  };
+  unsigned int hash = 5381U;
+  for (unsigned char c : nick) { hash = hash * 33U + static_cast<unsigned int>(std::tolower(c)); }
+  return palette[hash % (sizeof(palette) / sizeof(palette[0]))];
+}
+
+// Does the text mention our nick?
+bool mentions(std::string text, std::string nick) {
+  std::transform(text.begin(), text.end(), text.begin(), ::tolower);
+  std::transform(nick.begin(), nick.end(), nick.begin(), ::tolower);
+  return !nick.empty() && text.find(nick) != std::string::npos;
+}
+
+// Print one chat line. redraw is false when called from inside the readline
+// callback, because readline redraws the prompt itself after that
+void printChatLine(const std::string &channel, const std::string &nick, const std::string &text, bool redraw) {
+  bool colour = global_cfg->colour;
+  bool mention = nick != global_cfg->nick && mentions(text, global_cfg->nick);
+  std::string shownNick = colour ? nickColour(nick) + nick + RESETCOLOUR : nick;
+  std::string shownText = (colour && mention) ? std::string(BOLD_YELLOW) + text + RESETCOLOUR : text;
+  std::lock_guard<std::mutex> lock(coutMutex);
+  if (redraw) { std::cout << "\r\033[K"; } // clear the prompt line, readline redraws it below
+  std::cout << "[" << timestamp() << "] [" << channel << "] <" << shownNick << "> " << shownText << "\n";
+  if (redraw) { rl_on_new_line(); rl_redisplay(); }
 }
