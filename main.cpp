@@ -55,7 +55,7 @@ struct Config {
   std::string nick = "Lunnis";
   std::string user = "Lunnis";
   std::string realname = "GNU IRC Client";
-  std::vector<std::string> channels = {"#ubuntu"};
+  std::vector<std::string> channels = {"#ubuntu", "#debian"};
   std::string logFile = "/tmp/0veric.log";
   std::string activeChannel = "#ubuntu";
   bool colour = true;
