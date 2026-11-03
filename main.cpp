@@ -38,7 +38,6 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -554,19 +553,13 @@ X509 *peerCertificate(SSL *ssl) {
 
 int connectToServer(const std::string &server, int port) {
   int sockfd;
-  int server_host;
   struct sockaddr_in serv_addr{};
-  //struct hostent *server_host;
-  struct addrinfo hints, *res, *p;
+  struct hostent *server_host;
   if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     perror("Socket creation failed");
     return -1;
   }
-  memset(&hints, 0, sizeof(hints));
-  //hints.ai_family = AF_UNSPEC;
-  hints.ai_family = AF_INET; 
-  hints.ai_socktype = SOCK_STREAM;
-  if ((server_host = getaddrinfo(server.c_str(), NULL, &hints, &res)) != 0) {
+  if ((server_host = gethostbyname(server.c_str())) == nullptr) {
     std::cerr << "No such host: " << server << std::endl;
     close(sockfd);
     return -1;
