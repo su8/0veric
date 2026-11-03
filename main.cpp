@@ -563,7 +563,7 @@ int connectToServer(const std::string &server, int port) {
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
-  if ((server_host = gethostbyname(server.c_str(), NULL, &hints, &res)) != 0) {
+  if ((server_host = getaddrinfo(server.c_str(), NULL, &hints, &res)) != 0) {
     std::cerr << "No such host: " << server << std::endl;
     close(sockfd);
     return -1;
