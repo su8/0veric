@@ -67,14 +67,13 @@ struct IRCMessage {
   std::vector<std::string> params;
 };
 
-// State of one connection to the server
 struct Session {
-  std::string nickServ;   // NickServ password, empty if there is none
-  bool joined = false;    // channels were joined after the welcome
-  bool greeted = false;   // greeting after the NickServ identification was sent
+  std::string nickServ;
+  bool joined = false;
+  bool greeted = false;
+  bool nickChanged = false;   // only try one alternate nick on 433
 };
 
-// Closes the socket when the connection attempt ends, however it ends
 struct Socket {
   int fd;
   explicit Socket(int f) : fd(f) {}
@@ -84,27 +83,25 @@ struct Socket {
 };
 
 using SslCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
-using SslPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
-using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+using SslPtr    = std::unique_ptr<SSL, decltype(&SSL_free)>;
+using X509Ptr   = std::unique_ptr<X509, decltype(&X509_free)>;
 
 std::atomic<bool> running(true);
 std::mutex coutMutex;
 
-// Global pointers for readline callback
 SSL *global_ssl = nullptr;
 Config *global_cfg = nullptr;
-// Complete nick lists, the key is the lowercase channel name
 std::map<std::string, std::vector<std::string>> channelNicks;
-// 353 replies that wait for the 366 which ends the list
 std::map<std::string, std::vector<std::string>> pendingNicks;
 bool readlineActive = false;
-bool showRaw = false;   // /debug prints every line from the server
+bool showRaw = false;
 
-std::string timestamp(void);
+// ---- Declarations ----
+std::string timestamp();
 void logToFile(const std::string &filename, const std::string &line);
 IRCMessage parseIRCMessage(const std::string &raw);
 int connectToServer(const std::string &server, int port);
-SSL_CTX *initSSL(void);
+SSL_CTX *initSSL();
 X509 *peerCertificate(SSL *ssl);
 void sendIRC(SSL *ssl, std::string cmd);
 bool readFromServer(SSL *ssl, std::string &inbuf);
@@ -114,41 +111,48 @@ bool runConnection(Config &cfg, const std::string &nickServ);
 bool loadConfig(Config &cfg);
 void handleSigint(int);
 void inputHandler(char *input);
-// Text helpers
+
 std::string trimSpaces(const std::string &s);
 std::string lower(std::string s);
 bool iequals(const std::string &a, const std::string &b);
 bool isChannelName(const std::string &name);
 bool hasChannel(const Config &cfg, const std::string &name);
-// Removes control characters and mIRC colour codes, so that the server can't send terminal escape sequences
 std::string cleanText(const std::string &text);
 bool mentions(const std::string &text, const std::string &nick);
-// Colours
+
 std::string paint(const char *code, const std::string &text);
 std::string nickColour(const std::string &nick);
 std::string channelColour(const std::string &channel);
 std::string colouredChannel(const std::string &channel);
-// Output
+
 void printAbovePrompt(const std::string &line, bool inCallback = false);
-void showChat(const std::string &label, const std::string &nick, const std::string &text, bool inCallback, bool highlight, bool action = false);
+void showChat(const std::string &label, const std::string &nick, const std::string &text,
+              bool inCallback, bool highlight, bool action = false);
 void showNotice(const std::string &text, bool inCallback = false);
-// Collect the NAMES reply (353) and publish it at the end of the list (366)
+
 void collectNames(const IRCMessage &msg);
 void finishNames(const IRCMessage &msg);
-// Readline completion generator
-char *nicknameGenerator(const char* text, int state);
-// Readline completion entry point
-char **nicknameCompletion(const char* text, int start, int end);
+void addNickToChannel(const std::string &chan, const std::string &nick);
+void removeNickFromChannel(const std::string &chan, const std::string &nick);
+void renameNick(const std::string &oldNick, const std::string &newNick);
 
-int main(void) {
+char *nicknameGenerator(const char *text, int state);
+char **nicknameCompletion(const char *text, int start, int end);
+
+// ---- main ----
+int main() {
   signal(SIGINT, handleSigint);
+  signal(SIGPIPE, SIG_IGN);  // dead sockets must not kill us
+
   Config cfg;
   loadConfig(cfg);
-  const char *noColour = std::getenv("NO_COLOR"); // https://no-color.org
+  const char *noColour = std::getenv("NO_COLOR");
   if (noColour && *noColour) { cfg.colour = false; }
   global_cfg = &cfg;
+
   const char *password = std::getenv("NICKSERV_PASSWORD");
   const std::string nickServ = password ? password : "";
+
   unsigned int failures = 0U;
   while (running) {
     if (runConnection(cfg, nickServ)) {
@@ -158,7 +162,6 @@ int main(void) {
         sleep(5);
       }
     } else {
-      // 5, 10, 20, 40 and then 60 seconds between the attempts
       failures++;
       unsigned int delay = std::min(5U << std::min(failures - 1U, 4U), 60U);
       std::cerr << "[" << timestamp() << "] Retry in " << delay << " seconds...\n";
@@ -169,70 +172,68 @@ int main(void) {
   return EXIT_SUCCESS;
 }
 
-// One connection: connect, verify the certificate, register and run until it ends.
-// Returns false when the connection could not be established
+// ---- Connection ----
 bool runConnection(Config &cfg, const std::string &nickServ) {
   Socket sock(connectToServer(cfg.server, cfg.port));
   if (sock.fd < 0) { return false; }
   SslCtxPtr ctx(initSSL(), SSL_CTX_free);
   if (!ctx) { return false; }
   SslPtr ssl(SSL_new(ctx.get()), SSL_free);
-  if (!ssl) {
-    ERR_print_errors_fp(stderr);
-    return false;
-  }
+  if (!ssl) { ERR_print_errors_fp(stderr); return false; }
+
   SSL_set_fd(ssl.get(), sock.fd);
-  // SNI, and the certificate must be valid for this host name, not just for any host
   SSL_set_tlsext_host_name(ssl.get(), cfg.server.c_str());
   if (SSL_set1_host(ssl.get(), cfg.server.c_str()) != 1) {
     std::cerr << "Error: could not set the host name to verify." << std::endl;
     return false;
   }
-  if (SSL_connect(ssl.get()) <= 0) {
-    ERR_print_errors_fp(stderr);
-    return false;
-  }
+  if (SSL_connect(ssl.get()) <= 0) { ERR_print_errors_fp(stderr); return false; }
+
   X509Ptr cert(peerCertificate(ssl.get()), X509_free);
-  if (!cert) {
-    std::cerr << "Error: No certificate presented by server." << std::endl;
-    return false;
-  }
+  if (!cert) { std::cerr << "Error: No certificate presented by server." << std::endl; return false; }
   if (SSL_get_verify_result(ssl.get()) != X509_V_OK) {
     std::cerr << "Error: certificate verification failed." << std::endl;
     return false;
   }
+
   std::cout << "SSL connection established and certificate verified." << std::endl;
-  std::cout << "[" << timestamp() << "] Connected to " << cfg.server << " with " << SSL_get_cipher(ssl.get()) << " encryption.\n";
+  std::cout << "[" << timestamp() << "] Connected to " << cfg.server
+            << " with " << SSL_get_cipher(ssl.get()) << " encryption.\n";
+
   global_ssl = ssl.get();
-  // The nick lists belong to one connection
   channelNicks.clear();
   pendingNicks.clear();
-  // IRC handshake
+
   sendIRC(ssl.get(), "NICK " + cfg.nick);
   sendIRC(ssl.get(), "USER " + cfg.user + " 0 * :" + cfg.realname);
-  // Setup readline
+
+  // Readline setup + history
   rl_attempted_completion_function = nicknameCompletion;
+  const char *home = std::getenv("HOME");
+  std::string histPath = (home ? std::string(home) : std::string(".")) + "/.0veric_history";
+  read_history(histPath.c_str());
   rl_callback_handler_install("> ", inputHandler);
   readlineActive = true;
+
   Session session;
   session.nickServ = nickServ;
   std::string inbuf;
   fd_set readfds;
   const int sslFd = SSL_get_fd(ssl.get());
+
   while (running) {
     FD_ZERO(&readfds);
     FD_SET(sslFd, &readfds);
     FD_SET(STDIN_FILENO, &readfds);
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
+    struct timeval tv{1, 0};
     int activity = select(std::max(sslFd, STDIN_FILENO) + 1, &readfds, nullptr, nullptr, &tv);
     if (activity < 0) {
-      if (errno == EINTR) { continue; } // Ctrl+C: the loop condition ends the program
+      if (errno == EINTR) { continue; }
       perror("select");
       break;
     }
-    // Server messages
+    if (activity == 0) { continue; }  // timeout, nothing ready
+
     if (FD_ISSET(sslFd, &readfds)) {
       if (!readFromServer(ssl.get(), inbuf)) {
         printAbovePrompt("[" + timestamp() + "] Connection closed by server.");
@@ -240,19 +241,19 @@ bool runConnection(Config &cfg, const std::string &nickServ) {
       }
       processInput(inbuf, ssl.get(), cfg, session);
     }
-    // User input
     if (FD_ISSET(STDIN_FILENO, &readfds)) {
       rl_callback_read_char();
     }
   }
+
   readlineActive = false;
   rl_callback_handler_remove();
+  write_history(histPath.c_str());
   SSL_shutdown(ssl.get());
   global_ssl = nullptr;
   return true;
 }
 
-// Read everything that is available now; false when the connection is gone
 bool readFromServer(SSL *ssl, std::string &inbuf) {
   char buffer[4096];
   do {
@@ -263,12 +264,10 @@ bool readFromServer(SSL *ssl, std::string &inbuf) {
       return false;
     }
     inbuf.append(buffer, static_cast<size_t>(bytes));
-    // Data that OpenSSL already decrypted is not visible to select()
   } while (SSL_pending(ssl) > 0);
   return true;
 }
 
-// A read can end in the middle of a line: only complete lines are handled, the rest stays in the buffer
 void processInput(std::string &inbuf, SSL *ssl, Config &cfg, Session &session) {
   size_t pos;
   while ((pos = inbuf.find('\n')) != std::string::npos) {
@@ -279,26 +278,24 @@ void processInput(std::string &inbuf, SSL *ssl, Config &cfg, Session &session) {
     if (showRaw) { printAbovePrompt(paint(GREY, "[RAW] " + cleanText(line))); }
     handleMessage(parseIRCMessage(line), ssl, cfg, session);
   }
-  if (inbuf.size() > 65536) { inbuf.clear(); } // a line that never ends
+  if (inbuf.size() > 65536) { inbuf.clear(); }
 }
 
-// Collect the NAMES reply (353): ":server 353 me = #channel :nick1 @nick2 +nick3"
-// A long list arrives in several parts, so the nicks are kept until 366
+// ---- NAMES handling ----
 void collectNames(const IRCMessage &msg) {
   if (msg.params.size() < 4) { return; }
   std::vector<std::string> &list = pendingNicks[lower(msg.params[2])];
   std::istringstream names(msg.params[3]);
   std::string nick;
   while (names >> nick) {
-    size_t first = nick.find_first_not_of("~&@%+"); // all the status prefixes
+    size_t first = nick.find_first_not_of("~&@%+");
     if (first == std::string::npos) { continue; }
     nick = nick.substr(first);
-    nick = nick.substr(0, nick.find('!')); // userhost-in-names
+    nick = nick.substr(0, nick.find('!'));
     if (!nick.empty()) { list.push_back(nick); }
   }
 }
 
-// RPL_ENDOFNAMES (366): ":server 366 me #channel :End of /NAMES list."
 void finishNames(const IRCMessage &msg) {
   if (msg.params.size() < 2) { return; }
   auto it = pendingNicks.find(lower(msg.params[1]));
@@ -307,13 +304,39 @@ void finishNames(const IRCMessage &msg) {
   pendingNicks.erase(it);
 }
 
-// Readline completion generator
-char *nicknameGenerator(const char* text, int state) {
+void addNickToChannel(const std::string &chan, const std::string &nick) {
+  if (nick.empty() || chan.empty()) { return; }
+  auto &list = channelNicks[lower(chan)];
+  for (const auto &n : list) {
+    if (iequals(n, nick)) { return; }
+  }
+  list.push_back(nick);
+}
+
+void removeNickFromChannel(const std::string &chan, const std::string &nick) {
+  auto it = channelNicks.find(lower(chan));
+  if (it == channelNicks.end()) { return; }
+  auto &v = it->second;
+  v.erase(std::remove_if(v.begin(), v.end(),
+                         [&](const std::string &n) { return iequals(n, nick); }),
+          v.end());
+}
+
+void renameNick(const std::string &oldNick, const std::string &newNick) {
+  for (auto &kv : channelNicks) {
+    for (auto &n : kv.second) {
+      if (iequals(n, oldNick)) { n = newNick; }
+    }
+  }
+}
+
+// ---- Readline completion ----
+char *nicknameGenerator(const char *text, int state) {
   static size_t list_index;
   static size_t len;
   static std::vector<std::string> matches;
 
-  if (!state) { // First call
+  if (!state) {
     list_index = 0;
     len = strlen(text);
     matches.clear();
@@ -327,42 +350,50 @@ char *nicknameGenerator(const char* text, int state) {
       }
     }
   }
-
   if (list_index < matches.size()) {
     return strdup(matches[list_index++].c_str());
   }
   return nullptr;
 }
 
-// Readline completion entry point
-char **nicknameCompletion(const char* text, int start, int end) {
+char **nicknameCompletion(const char *text, int start, int end) {
   (void)start; (void)end;
-  rl_attempted_completion_over = 1; // no file names when there is no nick
+  rl_attempted_completion_over = 1;
   return rl_completion_matches(text, nicknameGenerator);
 }
 
+// ---- Input ----
 void inputHandler(char *input) {
-  if (!input) {
-    running = false;
-    return;
-  }
+  if (!input) { running = false; return; }
   std::string cmd(input);
   free(input);
-  if (cmd.empty()) return;
+  if (cmd.empty()) { return; }
   add_history(cmd.c_str());
-  if (cmd == "/quit") {
+
+  auto isCmd = [&](const char *c) { return cmd == c; };
+  auto isPrefix = [&](const char *p) { return cmd.rfind(p, 0) == 0; };
+
+  if (isCmd("/quit") || isCmd("/exit")) {
     sendIRC(global_ssl, "QUIT :Bye!");
     running = false;
-  } else if (cmd == "/list") {
+  } else if (isCmd("/list")) {
     std::string text = "Joined to the following channel(s)";
     for (const auto &channel : global_cfg->channels) {
       text += "\n" + colouredChannel(channel);
     }
     printAbovePrompt(text, true);
-  } else if (cmd == "/debug") {
+  } else if (isCmd("/names")) {
+    if (!global_cfg->activeChannel.empty()) {
+      sendIRC(global_ssl, "NAMES " + global_cfg->activeChannel);
+    }
+  } else if (isCmd("/clear")) {
+    std::cout << "\033[2J\033[H" << std::flush;
+  } else if (isCmd("/debug")) {
     showRaw = !showRaw;
     printAbovePrompt(std::string("*** Raw server lines ") + (showRaw ? "ON" : "OFF"), true);
-  } else if (cmd.rfind("/join ", 0) == 0) {
+  } else if (isPrefix("/raw ")) {
+    sendIRC(global_ssl, cmd.substr(5));
+  } else if (isPrefix("/join ")) {
     std::string chan = trimSpaces(cmd.substr(6));
     if (!isChannelName(chan)) {
       printAbovePrompt("*** Usage: /join #channel", true);
@@ -371,7 +402,33 @@ void inputHandler(char *input) {
     sendIRC(global_ssl, "JOIN " + chan);
     if (!hasChannel(*global_cfg, chan)) { global_cfg->channels.push_back(chan); }
     global_cfg->activeChannel = chan;
-  } else if (cmd.rfind("/switch ", 0) == 0) {
+  } else if (isPrefix("/part")) {
+    std::string chan = trimSpaces(cmd.substr(5));
+    if (chan.empty()) { chan = global_cfg->activeChannel; }
+    if (!isChannelName(chan)) {
+      printAbovePrompt("*** Usage: /part [#channel]", true);
+      return;
+    }
+    sendIRC(global_ssl, "PART " + chan + " :Leaving");
+    auto &v = global_cfg->channels;
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const std::string &c) { return iequals(c, chan); }),
+            v.end());
+    if (iequals(global_cfg->activeChannel, chan)) {
+      global_cfg->activeChannel = v.empty() ? std::string() : v.front();
+    }
+  } else if (isPrefix("/close")) {
+    // same as /part of active channel
+    if (!global_cfg->activeChannel.empty()) {
+      std::string chan = global_cfg->activeChannel;
+      sendIRC(global_ssl, "PART " + chan + " :Leaving");
+      auto &v = global_cfg->channels;
+      v.erase(std::remove_if(v.begin(), v.end(),
+                             [&](const std::string &c) { return iequals(c, chan); }),
+              v.end());
+      global_cfg->activeChannel = v.empty() ? std::string() : v.front();
+    }
+  } else if (isPrefix("/switch ")) {
     std::string chan = trimSpaces(cmd.substr(8));
     for (auto &c : global_cfg->channels) {
       if (iequals(c, chan)) {
@@ -381,54 +438,71 @@ void inputHandler(char *input) {
       }
     }
     printAbovePrompt("[" + timestamp() + "] *** Not in channel " + cleanText(chan), true);
-  } else if (cmd.rfind("/msg ", 0) == 0) {
+  } else if (isPrefix("/msg ")) {
     std::istringstream iss(cmd.substr(5));
     std::string target;
     iss >> target;
     std::string text;
     std::getline(iss, text);
-    if (!text.empty() && text[0] == ' ') text.erase(0, 1);
+    if (!text.empty() && text[0] == ' ') { text.erase(0, 1); }
     if (target.empty() || text.empty()) {
       printAbovePrompt("*** Usage: /msg target message", true);
       return;
     }
     sendIRC(global_ssl, "PRIVMSG " + target + " :" + text);
-    // Show what was sent, the server doesn't send it back
-    std::string label = isChannelName(target) ? colouredChannel(target) : paint(MAGENTA, "PM -> " + cleanText(target));
+    std::string label = isChannelName(target) ? colouredChannel(target)
+                                              : paint(MAGENTA, "PM -> " + cleanText(target));
     showChat(label, global_cfg->nick, cleanText(text), true, false);
-  } else if (cmd.rfind("/whois ", 0) == 0) {
+  } else if (isPrefix("/me ")) {
+    std::string text = cmd.substr(4);
+    if (text.empty() || global_cfg->activeChannel.empty()) { return; }
+    sendIRC(global_ssl, "PRIVMSG " + global_cfg->activeChannel + " :\x01ACTION " + text + "\x01");
+    showChat(colouredChannel(global_cfg->activeChannel), global_cfg->nick,
+             cleanText(text), true, false, true);
+  } else if (isPrefix("/nick ")) {
+    std::string newNick = trimSpaces(cmd.substr(6));
+    if (newNick.empty()) {
+      printAbovePrompt("*** Usage: /nick newnick", true);
+      return;
+    }
+    sendIRC(global_ssl, "NICK " + newNick);
+  } else if (isCmd("/away")) {
+    sendIRC(global_ssl, "AWAY :Away");
+  } else if (isCmd("/back")) {
+    sendIRC(global_ssl, "AWAY");
+  } else if (isPrefix("/topic ")) {
+    if (global_cfg->activeChannel.empty()) { return; }
+    sendIRC(global_ssl, "TOPIC " + global_cfg->activeChannel + " :" + cmd.substr(7));
+  } else if (isPrefix("/whois ")) {
     sendIRC(global_ssl, "WHOIS " + cmd.substr(7));
   } else {
-    // Default: send to active channel
     if (global_cfg->activeChannel.empty()) {
       printAbovePrompt("*** No active channel, use /join #channel", true);
       return;
     }
     sendIRC(global_ssl, "PRIVMSG " + global_cfg->activeChannel + " :" + cmd);
-    showChat(colouredChannel(global_cfg->activeChannel), global_cfg->nick, cleanText(cmd), true, false);
+    showChat(colouredChannel(global_cfg->activeChannel), global_cfg->nick,
+             cleanText(cmd), true, false);
   }
 }
 
-// Only set the flag: a signal handler must not lock a mutex or print
-void handleSigint(int) {
-  running = false;
-}
+void handleSigint(int) { running = false; }
 
-// One "key value" per line, # starts a comment, the value can contain spaces
+// ---- Config ----
 bool loadConfig(Config &cfg) {
   const char *home = std::getenv("HOME");
   std::ifstream file((home ? std::string(home) + "/" : std::string("./")) + ".0veric.conf");
-  if (!file) return false;
+  if (!file) { return false; }
   bool channelsGiven = false;
   std::string line;
   while (std::getline(file, line)) {
     line = trimSpaces(line);
-    if (line.empty() || line[0] == '#') continue;
+    if (line.empty() || line[0] == '#') { continue; }
     size_t split = line.find_first_of(" \t");
-    if (split == std::string::npos) continue;
+    if (split == std::string::npos) { continue; }
     std::string key = line.substr(0, split);
     std::string value = trimSpaces(line.substr(split));
-    if (value.empty()) continue;
+    if (value.empty()) { continue; }
     if (key == "server") cfg.server = value;
     else if (key == "port") {
       try {
@@ -443,23 +517,23 @@ bool loadConfig(Config &cfg) {
     else if (key == "user") cfg.user = value;
     else if (key == "realname") cfg.realname = value;
     else if (key == "channel") {
-      // The channels of the file replace the built-in default
       if (!channelsGiven) { cfg.channels.clear(); channelsGiven = true; }
       if (!hasChannel(cfg, value)) { cfg.channels.push_back(value); }
     }
     else if (key == "logfile") cfg.logFile = value;
     else if (key == "colour") cfg.colour = (value != "off" && value != "no" && value != "0");
   }
-  if (!cfg.channels.empty()) cfg.activeChannel = cfg.channels[0];
+  cfg.activeChannel = cfg.channels.empty() ? std::string() : cfg.channels.front();
   return true;
 }
 
+// ---- Message handling ----
 void handleMessage(const IRCMessage &msg, SSL *ssl, Config &cfg, Session &session) {
   const std::string &cmd = msg.command;
+
   if (cmd == "PING") {
     sendIRC(ssl, "PONG :" + (msg.params.empty() ? std::string() : msg.params[0]));
   } else if ((cmd == "376" || cmd == "422") && !session.joined) {
-    // End of the MOTD, or no MOTD: the server is ready, the channels are joined with or without a password
     session.joined = true;
     if (!session.nickServ.empty()) {
       sendIRC(ssl, "PRIVMSG NickServ :IDENTIFY " + session.nickServ);
@@ -467,58 +541,134 @@ void handleMessage(const IRCMessage &msg, SSL *ssl, Config &cfg, Session &sessio
     for (const auto &chan : cfg.channels) {
       sendIRC(ssl, "JOIN " + chan);
     }
-  } else if (cmd == "433" && !session.joined) {
-    // Nickname in use while registering
+  } else if (cmd == "433" && !session.joined && !session.nickChanged) {
+    session.nickChanged = true;
     cfg.nick += "_";
     sendIRC(ssl, "NICK " + cfg.nick);
     showNotice("*** Nickname in use, trying " + cfg.nick);
+  } else if (cmd == "001") {
+    // Welcome: nothing to do here, join happens on 376/422
   } else if (cmd == "353") {
     collectNames(msg);
   } else if (cmd == "366") {
     finishNames(msg);
+  } else if (cmd == "JOIN" && !msg.prefix.empty() && !msg.params.empty()) {
+    std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    std::string chan = cleanText(msg.params[0]);
+    if (iequals(nick, cfg.nick)) {
+      addNickToChannel(chan, nick);
+    } else {
+      addNickToChannel(chan, nick);
+    }
+  } else if (cmd == "PART" && !msg.prefix.empty() && !msg.params.empty()) {
+    std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    std::string chan = cleanText(msg.params[0]);
+    removeNickFromChannel(chan, nick);
+  } else if (cmd == "QUIT" && !msg.prefix.empty()) {
+    std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    for (auto &kv : channelNicks) { removeNickFromChannel(kv.first, nick); }
+  } else if (cmd == "KICK" && msg.params.size() >= 2) {
+    std::string chan = cleanText(msg.params[0]);
+    std::string who  = cleanText(msg.params[1]);
+    removeNickFromChannel(chan, who);
+  } else if (cmd == "NICK" && !msg.prefix.empty() && !msg.params.empty()) {
+    std::string oldNick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    std::string newNick = cleanText(msg.params[0]);
+    renameNick(oldNick, newNick);
+    if (iequals(oldNick, cfg.nick)) { cfg.nick = newNick; }
+  } else if (cmd == "PRIVMSG" && msg.params.size() >= 2) {
+    const std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    const std::string target = clean;
   } else if (cmd == "PRIVMSG" && msg.params.size() >= 2) {
     const std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
     const std::string target = cleanText(msg.params[0]);
     std::string text = msg.params[1];
-    const bool isPM = iequals(target, cfg.nick); // sent to our nick, not to a channel
+    const bool isPM = iequals(target, cfg.nick);
     bool action = false;
+
     if (!text.empty() && text[0] == '\x01') {
-      // CTCP: show /me actions, ignore the other requests
-      const std::string actionPrefix = std::string(1, '\x01') + "ACTION ";
-      if (text.compare(0, actionPrefix.size(), actionPrefix) != 0) { return; }
-      text = text.substr(actionPrefix.size());
-      action = true;
+      // CTCP: handle ACTION, reply to VERSION/PING, ignore everything else
+      const std::string body = text.substr(1, text.size() >= 2 && text.back() == '\x01'
+                                                 ? text.size() - 2
+                                                 : std::string::npos);
+      if (body.rfind("ACTION ", 0) == 0) {
+        text = body.substr(7);
+        action = true;
+      } else if (body == "VERSION") {
+        sendIRC(ssl, "NOTICE " + nick + " :\x01VERSION 0veric :3\x01");
+        return;
+      } else if (body.rfind("PING", 0) == 0) {
+        sendIRC(ssl, "NOTICE " + nick + " :\x01" + body + "\x01");
+        return;
+      } else {
+        return; // other CTCP requests are ignored
+      }
     }
+
     text = cleanText(text);
     const std::string label = isPM ? paint(MAGENTA, "PM") : colouredChannel(target);
     const bool highlight = !isPM && mentions(text, cfg.nick);
     showChat(label, nick, text, false, highlight, action);
-    // The log gets plain text, without colour codes
-    logToFile(cfg.logFile, "[" + (isPM ? std::string("PM") : target) + "] " + (action ? "* " + nick : "<" + nick + ">") + " " + text);
+    logToFile(cfg.logFile, "[" + (isPM ? std::string("PM") : target) + "] " +
+                           (action ? "* " + nick : "<" + nick + ">") + " " + text);
+
   } else if (cmd == "NOTICE" && msg.params.size() >= 2) {
     const std::string from = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
-    const std::string text = cleanText(msg.params[1]);
+    std::string text = msg.params[1];
+    // Ignore CTCP replies (VERSION, PING) we might receive from other clients
+    if (!text.empty() && text[0] == '\x01') { return; }
+    text = cleanText(text);
     showNotice("-" + from + "- " + text);
     logToFile(cfg.logFile, "[NOTICE] -" + from + "- " + text);
-    if (!session.greeted && !session.nickServ.empty() && iequals(from, "NickServ") && text.find("You are now identified") != std::string::npos) {
+    if (!session.greeted && !session.nickServ.empty() &&
+        iequals(from, "NickServ") &&
+        text.find("You are now identified") != std::string::npos) {
       session.greeted = true;
-      sendIRC(ssl, "PRIVMSG " + cfg.activeChannel + " :Hello from a secure, verified TLS IRC client!");
+      if (!cfg.activeChannel.empty()) {
+        sendIRC(ssl, "PRIVMSG " + cfg.activeChannel +
+                     " :Hello from a secure, verified TLS IRC client!");
+      }
     }
-  } else if (cmd.size() == 3 && (cmd[0] == '4' || cmd[0] == '5') && std::isdigit(static_cast<unsigned char>(cmd[1])) && std::isdigit(static_cast<unsigned char>(cmd[2]))) {
-    // Error replies, for example "no such nick" or "cannot join channel"
+
+  } else if (cmd == "TOPIC" && msg.params.size() >= 2) {
+    const std::string chan = cleanText(msg.params[0]);
+    const std::string topic = cleanText(msg.params[1]);
+    const std::string who = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    showNotice("*** " + who + " set topic on " + cleanText(chan) + ": " + topic);
+    logToFile(cfg.logFile, "[TOPIC] " + chan + " by " + who + ": " + topic);
+
+  } else if (cmd == "KICK" && msg.params.size() >= 3) {
+    const std::string chan = cleanText(msg.params[0]);
+    const std::string who  = cleanText(msg.params[1]);
+    const std::string reason = cleanText(msg.params[2]);
+    const std::string by = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
+    showNotice("*** " + who + " was kicked from " + cleanText(chan) +
+               " by " + by + " (" + reason + ")");
+    logToFile(cfg.logFile, "[KICK] " + who + " from " + chan + " by " + by + ": " + reason);
+
+  } else if (cmd == "NICK" && !msg.prefix.empty() && !msg.params.empty()) {
+    // (already handled above; kept here for clarity if the earlier branch is removed)
+
+  } else if (cmd.size() == 3 && (cmd[0] == '4' || cmd[0] == '5') &&
+             std::isdigit(static_cast<unsigned char>(cmd[1])) &&
+             std::isdigit(static_cast<unsigned char>(cmd[2]))) {
+    // Error replies, e.g. "no such nick" or "cannot join channel"
     std::string text;
-    for (size_t i = 1; i < msg.params.size(); i++) { text += (text.empty() ? "" : " ") + msg.params[i]; }
+    for (size_t i = 1; i < msg.params.size(); i++) {
+      text += (text.empty() ? "" : " ") + msg.params[i];
+    }
     text = cleanText(text);
     showNotice("*** " + text);
     logToFile(cfg.logFile, "[" + cmd + "] " + text);
+
   } else {
     logToFile(cfg.logFile, "[RAW] " + msg.command);
   }
 }
 
+// ---- Network ----
 void sendIRC(SSL *ssl, std::string cmd) {
-  if (!ssl) return;
-  // A line break inside the text would start a second command
+  if (!ssl) { return; }
   std::replace(cmd.begin(), cmd.end(), '\r', ' ');
   std::replace(cmd.begin(), cmd.end(), '\n', ' ');
   cmd += "\r\n";
@@ -527,22 +677,18 @@ void sendIRC(SSL *ssl, std::string cmd) {
   }
 }
 
-SSL_CTX *initSSL(void) {
+SSL_CTX *initSSL() {
   SSL_library_init();
   SSL_load_error_strings();
   OpenSSL_add_all_algorithms();
   const SSL_METHOD *method = TLS_client_method();
   SSL_CTX *ctx = SSL_CTX_new(method);
-  if (!ctx) {
-    ERR_print_errors_fp(stderr);
-    return nullptr;
-  }
+  if (!ctx) { ERR_print_errors_fp(stderr); return nullptr; }
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
   SSL_CTX_set_default_verify_paths(ctx);
   return ctx;
 }
 
-// OpenSSL 3 renamed the function, LibreSSL still uses the old name
 X509 *peerCertificate(SSL *ssl) {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
   return SSL_get1_peer_certificate(ssl);
@@ -551,35 +697,43 @@ X509 *peerCertificate(SSL *ssl) {
 #endif
 }
 
+// Modern, IPv6-capable replacement for gethostbyname()
 int connectToServer(const std::string &server, int port) {
-  int sockfd;
-  struct sockaddr_in serv_addr{};
-  struct hostent *server_host;
-  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-    perror("Socket creation failed");
+  struct addrinfo hints{};
+  hints.ai_family   = AF_UNSPEC;     // allow IPv4 and IPv6
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+
+  const std::string portStr = std::to_string(port);
+  struct addrinfo *res = nullptr;
+  int rc = getaddrinfo(server.c_str(), portStr.c_str(), &hints, &res);
+  if (rc != 0) {
+    std::cerr << "No such host: " << server
+              << " (" << gai_strerror(rc) << ")" << std::endl;
     return -1;
   }
-  if ((server_host = gethostbyname(server.c_str())) == nullptr) {
-    std::cerr << "No such host: " << server << std::endl;
+
+  int sockfd = -1;
+  for (struct addrinfo *p = res; p != nullptr; p = p->ai_next) {
+    sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (sockfd < 0) { continue; }
+    if (connect(sockfd, p->ai_addr, p->ai_addrlen) == 0) { break; }
     close(sockfd);
-    return -1;
+    sockfd = -1;
   }
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_port = htons(port);
-  std::memcpy(&serv_addr.sin_addr.s_addr, server_host->h_addr, server_host->h_length);
-  if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-    perror("Connection failed");
-    close(sockfd);
-    return -1;
-  }
+  freeaddrinfo(res);
+
+  if (sockfd < 0) { perror("Connection failed"); }
   return sockfd;
 }
 
+// ---- Parsing ----
 IRCMessage parseIRCMessage(const std::string &raw) {
   IRCMessage msg;
   std::istringstream iss(raw);
   std::string token;
   if (!(iss >> token)) { return msg; }
+
   // IRCv3 message tags ("@time=...;id=... ") are skipped
   if (token[0] == '@') {
     if (!(iss >> token)) { return msg; }
@@ -604,7 +758,8 @@ IRCMessage parseIRCMessage(const std::string &raw) {
   return msg;
 }
 
-std::string timestamp(void) {
+// ---- Utilities ----
+std::string timestamp() {
   std::time_t now = std::time(nullptr);
   std::tm local{};
   localtime_r(&now, &local);
@@ -615,11 +770,10 @@ std::string timestamp(void) {
 
 void logToFile(const std::string &filename, const std::string &line) {
   std::ofstream out(filename, std::ios::app);
-  if (out) out << "[" << timestamp() << "] " << line << "\n";
+  if (out) { out << "[" << timestamp() << "] " << line << "\n"; }
 }
 
 // ---- Text helpers ----
-
 std::string trimSpaces(const std::string &s) {
   size_t start = s.find_first_not_of(" \t\r\n");
   if (start == std::string::npos) { return ""; }
@@ -628,7 +782,8 @@ std::string trimSpaces(const std::string &s) {
 }
 
 std::string lower(std::string s) {
-  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
 }
 
@@ -648,11 +803,13 @@ bool hasChannel(const Config &cfg, const std::string &name) {
 }
 
 std::string cleanText(const std::string &text) {
-  auto isDigit = [&text](size_t k) { return k < text.size() && std::isdigit(static_cast<unsigned char>(text[k])); };
+  auto isDigit = [&text](size_t k) {
+    return k < text.size() && std::isdigit(static_cast<unsigned char>(text[k]));
+  };
   std::string out;
   for (size_t i = 0; i < text.size(); i++) {
     unsigned char c = static_cast<unsigned char>(text[i]);
-    if (c == 0x03) { // mIRC colour: ^C, then up to 2 digits, optionally a comma and up to 2 digits
+    if (c == 0x03) { // mIRC colour: ^C + up to 2 digits, optionally ",N"
       size_t k = i + 1;
       if (isDigit(k)) {
         k++;
@@ -666,7 +823,7 @@ std::string cleanText(const std::string &text) {
       continue;
     }
     if (c == '\t') { out += ' '; continue; }
-    if (c < 0x20 || c == 0x7f) { continue; } // includes ESC, bold, underline and CTCP markers
+    if (c < 0x20 || c == 0x7f) { continue; } // ESC, bold, underline, CTCP markers
     out += text[i];
   }
   return out;
@@ -674,26 +831,27 @@ std::string cleanText(const std::string &text) {
 
 bool mentions(const std::string &text, const std::string &nick) {
   if (nick.empty()) { return false; }
-  auto isNickChar = [](char c) { return c != '\0' && (std::isalnum(static_cast<unsigned char>(c)) || std::strchr("[]\\`_^{|}-", c) != nullptr); };
+  auto isNickChar = [](char c) {
+    return c != '\0' &&
+           (std::isalnum(static_cast<unsigned char>(c)) ||
+            std::strchr("[]\\`_^{|}-", c) != nullptr);
+  };
   const std::string t = lower(text);
   const std::string n = lower(nick);
-  // The whole nick must be there: "al" is not mentioned by "also"
   for (size_t pos = t.find(n); pos != std::string::npos; pos = t.find(n, pos + 1)) {
     bool startOk = (pos == 0) || !isNickChar(t[pos - 1]);
-    bool endOk = (pos + n.size() >= t.size()) || !isNickChar(t[pos + n.size()]);
+    bool endOk   = (pos + n.size() >= t.size()) || !isNickChar(t[pos + n.size()]);
     if (startOk && endOk) { return true; }
   }
   return false;
 }
 
 // ---- Colours ----
-
 std::string paint(const char *code, const std::string &text) {
   if (!global_cfg || !global_cfg->colour) { return text; }
   return std::string(code) + text + RESETCOLOUR;
 }
 
-// The same nick always gets the same colour (case-insensitive, like IRC nicks)
 std::string nickColour(const std::string &nick) {
   static const char *palette[] = {
     "\033[1;31m", "\033[1;32m", "\033[1;33m", "\033[1;34m", "\033[1;35m", "\033[1;36m",
@@ -704,7 +862,6 @@ std::string nickColour(const std::string &nick) {
   return palette[hash % (sizeof(palette) / sizeof(palette[0]))];
 }
 
-// The same channel always gets the same colour (256-colour codes)
 std::string channelColour(const std::string &channel) {
   static const int palette[] = { 39, 45, 75, 111, 141, 147, 173, 179, 180, 208, 214, 215 };
   unsigned int hash = 5381U;
@@ -712,7 +869,6 @@ std::string channelColour(const std::string &channel) {
   return "\033[38;5;" + std::to_string(palette[hash % (sizeof(palette) / sizeof(palette[0]))]) + "m";
 }
 
-// A channel name in its colour, in bold if it is the active one
 std::string colouredChannel(const std::string &channel) {
   const std::string clean = cleanText(channel);
   if (!global_cfg || !global_cfg->colour) { return clean; }
@@ -721,9 +877,6 @@ std::string colouredChannel(const std::string &channel) {
 }
 
 // ---- Output ----
-
-// Print a line above the prompt without breaking what the user is typing.
-// inCallback is true inside inputHandler(), where readline redraws the prompt by itself
 void printAbovePrompt(const std::string &line, bool inCallback) {
   std::lock_guard<std::mutex> lock(coutMutex);
   if (inCallback || !readlineActive) {
@@ -743,15 +896,15 @@ void printAbovePrompt(const std::string &line, bool inCallback) {
   free(savedLine);
 }
 
-// One chat line: [time] [label] <nick> text. The label is a channel, "PM" or "PM -> nick"
-void showChat(const std::string &label, const std::string &nick, const std::string &text, bool inCallback, bool highlight, bool action) {
-  std::string shownNick = paint(nickColour(nick).c_str(), nick);
+void showChat(const std::string &label, const std::string &nick, const std::string &text,
+              bool inCallback, bool highlight, bool action) {
+  const std::string nickCode = nickColour(nick);
+  std::string shownNick = paint(nickCode.c_str(), nick);
   std::string who = action ? "* " + shownNick : "<" + shownNick + ">";
   std::string shownText = highlight ? paint(BOLD_YELLOW, text) : text;
   printAbovePrompt("[" + timestamp() + "] [" + label + "] " + who + " " + shownText, inCallback);
 }
 
-// Server notices and errors, in grey
 void showNotice(const std::string &text, bool inCallback) {
   printAbovePrompt("[" + timestamp() + "] " + paint(GREY, text), inCallback);
 }
