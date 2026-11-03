@@ -578,7 +578,7 @@ void handleMessage(const IRCMessage &msg, SSL *ssl, Config &cfg, Session &sessio
     if (iequals(oldNick, cfg.nick)) { cfg.nick = newNick; }
   } else if (cmd == "PRIVMSG" && msg.params.size() >= 2) {
     const std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
-    const std::string target = clean;
+    const std::string target = cleanText(msg.params[0]);
   } else if (cmd == "PRIVMSG" && msg.params.size() >= 2) {
     const std::string nick = cleanText(msg.prefix.substr(0, msg.prefix.find('!')));
     const std::string target = cleanText(msg.params[0]);
